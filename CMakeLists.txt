@@ -174,7 +174,7 @@ else ()
     if (WIN32)
         target_link_libraries(utpm tbs)
     else()
-        target_link_libraries(utpm dl)
+        target_link_libraries(utpm dl tss2-tctildr)
     endif()
 endif()
 

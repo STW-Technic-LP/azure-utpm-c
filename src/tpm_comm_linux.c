@@ -16,6 +16,7 @@
 #else // WIN32
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <tss2/tss2_tctildr.h>
 #endif // WIN32
 
 #include "umock_c/umock_c_prod.h"
@@ -46,6 +47,8 @@ static const char* const TPM_NEW_USERMODE_RESOURCE_MGR_ARM = "/usr/lib/arm-linux
 #define REMOTE_SESSION_END_CMD      20
 
 static const char* const TPM_UM_RM_ADDRESS = "127.0.0.1";
+
+static TPM_COMM_HANDLE m_tpm_comm_handle = NULL;
 
 typedef enum
 {
@@ -190,6 +193,15 @@ static void* load_abrmd(void** dylib)
     const char* abrmd_name = TPM_TABRMD_USERMODE_RESOURCE_MGR;
     size_t size = 0;
     TCTI_RC rc = 0;
+    TSS2_TCTI_CONTEXT *ctx = NULL;
+    
+    rc = Tss2_TctiLdr_Initialize(getenv("TPM2TOOLS_TCTI"), &ctx);
+    if (rc == TSS2_RC_SUCCESS) 
+    {
+        *dylib = NULL;
+        tcti_ctx = ctx;
+        return tcti_ctx;
+    }
 
     *dylib = dlopen (abrmd_name, RTLD_LAZY);
     if (!*dylib)
@@ -319,8 +331,13 @@ TPM_COMM_HANDLE tpm_comm_create(const char* endpoint)
     else
     {
         memset(result, 0, sizeof(TPM_COMM_INFO));
-        // First check if kernel mode TPM Resource Manager is available
-        if ((result->dev_info.tpm_device = open(TPM_RM_DEVICE_NAME, O_RDWR)) >= 0)
+        // Try standard TCTI access and connecting to the user mode TPM resource manager
+        if (tpm_usermode_resmgr_connect(result) == 0)
+        {
+            (void)0;  // no action, conn_info flags set in function
+        }
+        // Check if kernel mode TPM Resource Manager is available
+        else if ((result->dev_info.tpm_device = open(TPM_RM_DEVICE_NAME, O_RDWR)) >= 0)
         {
             result->conn_info = TCI_SYS_DEV | TCI_TRM;
         }
@@ -329,14 +346,14 @@ TPM_COMM_HANDLE tpm_comm_create(const char* endpoint)
         {
             result->conn_info = TCI_SYS_DEV;
         }
-        // If the system TPM device is unavalable, try connecting to the user mode TPM resource manager
-        else if (tpm_usermode_resmgr_connect(result) != 0)
+        else
         {
             LogError("Failure: connecting to the TPM device");
             free(result);
             result = NULL;
         }
     }
+    m_tpm_comm_handle = result;
     return result;
 }
 
@@ -355,11 +372,20 @@ void tpm_comm_destroy(TPM_COMM_HANDLE handle)
         }
         else if (handle->conn_info & TCI_TCTI)
         {
-            TCTI_CTX *tcti_ctx = (TCTI_CTX*)handle->dev_info.tcti.ctx_handle;
-            tcti_ctx->finalize(handle->dev_info.tcti.ctx_handle);
-            dlclose(handle->dev_info.tcti.dylib);
+            if (handle->dev_info.tcti.dylib)
+            {
+               TCTI_CTX *tcti_ctx = (TCTI_CTX*)handle->dev_info.tcti.ctx_handle;
+               tcti_ctx->finalize(handle->dev_info.tcti.ctx_handle);
+               dlclose(handle->dev_info.tcti.dylib);
+            }
+            else
+            {
+               TSS2_TCTI_CONTEXT *tcti_ctx = (TSS2_TCTI_CONTEXT*)handle->dev_info.tcti.ctx_handle;
+               Tss2_TctiLdr_Finalize(&tcti_ctx);
+            }
         }
         free(handle);
+        m_tpm_comm_handle = NULL;
     }
 }
 
@@ -505,4 +531,13 @@ int tpm_comm_submit_command(TPM_COMM_HANDLE handle, const unsigned char* cmd_byt
         result = MU_FAILURE;
     }
     return result;
+}
+
+void tpm_comm_destroy_from_fork(void)
+{
+   //this can be called to release any TPM locks
+   //should only be used from a fork
+   //there are standard ways to close the handle otherwise
+   //NOTE: this only works with the assumption that only one handle is ever created
+   tpm_comm_destroy(m_tpm_comm_handle);
 }
