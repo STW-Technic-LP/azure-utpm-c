@@ -73,6 +73,7 @@ typedef struct TPM_COMM_INFO_TAG
             void*   dylib;
         }                   tcti;
     } dev_info;
+    void* next_comm;
 } TPM_COMM_INFO;
 
 typedef uint32_t TCTI_RC;
@@ -352,8 +353,28 @@ TPM_COMM_HANDLE tpm_comm_create(const char* endpoint)
             free(result);
             result = NULL;
         }
+        // add handle to the list if not null
+        if(result != NULL)
+        {
+            if (m_tpm_comm_handle == NULL)
+            {
+                //save this handle as the first handle
+                m_tpm_comm_handle = result;
+            }
+            else
+            {
+                // find last handle in current list and add this handle to it
+                TPM_COMM_HANDLE tpm_comm_handle = m_tpm_comm_handle;
+                while (tpm_comm_handle->next_comm != NULL)
+                {
+                    tpm_comm_handle = tpm_comm_handle->next_comm;
+                }
+                tpm_comm_handle->next_comm = result;
+            }
+            // this handle will be the last handle in the list
+            result->next_comm = NULL;
+        }
     }
-    m_tpm_comm_handle = result;
     return result;
 }
 
@@ -384,8 +405,31 @@ void tpm_comm_destroy(TPM_COMM_HANDLE handle)
                Tss2_TctiLdr_Finalize(&tcti_ctx);
             }
         }
+        //remove the handle from the list
+        if (handle == m_tpm_comm_handle)
+        {
+            // this handle is the first in list, just remove it
+            m_tpm_comm_handle = handle->next_comm;
+        }
+        else
+        {
+            // find the handle in the list
+            TPM_COMM_HANDLE tpm_comm_handle = m_tpm_comm_handle;
+            while ((tpm_comm_handle->next_comm != NULL) && (tpm_comm_handle->next_comm != handle))
+            {
+                tpm_comm_handle = tpm_comm_handle->next_comm;
+            }
+            if (tpm_comm_handle->next_comm == NULL)
+            {
+                LogError("Failure: TPM comm handle not found in list");
+            }
+            else
+            {
+                // remove this handle from list
+                tpm_comm_handle->next_comm = handle->next_comm;
+            }
+        }
         free(handle);
-        m_tpm_comm_handle = NULL;
     }
 }
 
@@ -538,6 +582,9 @@ void tpm_comm_destroy_from_fork(void)
    //this can be called to release any TPM locks
    //should only be used from a fork
    //there are standard ways to close the handle otherwise
-   //NOTE: this only works with the assumption that only one handle is ever created
-   tpm_comm_destroy(m_tpm_comm_handle);
+   while (m_tpm_comm_handle != NULL)
+   {
+       // m_tpm_comm_handle will update during the destroy
+       tpm_comm_destroy(m_tpm_comm_handle);
+   }
 }
